@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>D-Zone</title>
+<style>
+  :root { --bg: #111; --fg: #ccc; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px system-ui, sans-serif; display: flex; flex-direction: column; align-items: center; }
+  canvas { width: min(100vw, 133.33vh); aspect-ratio: 4 / 3; background: #000; }
+  p { margin: 8px 16px; }
+</style>
+</head>
+<body>
+<canvas id="screen" width="1600" height="1200"></canvas>
+<p id="status">불러오는 중…</p>
+<p>이동: 화살표 · 발사: 왼쪽 Option · 무기 교체: 왼쪽 Shift &nbsp;|&nbsp; 메뉴: 화살표와 Enter</p>
+<script type="module">
+// 게임은 작업 스레드(web/worker.js)에서 돈다. 여기서는 키를 넘기고, 화면을 그리고, 소리를 낸다.
+// 공유 메모리 배치는 worker.ts 머리 주석과 같다.
+const status = document.getElementById("status");
+const canvas = document.getElementById("screen"), ctx = canvas.getContext("2d");
+if (!crossOriginIsolated) {
+  // GitHub Pages 처럼 머리글을 못 바꾸는 곳에서는 coi.js 서비스 워커가 머리글을 붙이게 하고 한 번 새로 고친다
+  let tried = false;
+  try { tried = sessionStorage.getItem("coi") === "1"; sessionStorage.setItem("coi", "1"); } catch {}
+  if ("serviceWorker" in navigator && !tried) {
+    await navigator.serviceWorker.register("coi.js");
+    await navigator.serviceWorker.ready;
+    location.reload();
+    await new Promise(() => {});   // 새로 고침을 기다린다
+  }
+  status.textContent = "이 브라우저에서는 공유 메모리(SharedArrayBuffer)를 켜지 못해 게임을 돌릴 수 없다";
+  throw new Error("교차 출처 격리가 안 됐다");
+}
+
+const NAMES = ["DGROUP.BIN", "DZONE.CNF", "DZONE.KEY", "DZONE.GDA", "SHOP.GDA", "SVGA16.GDA"];   // port/data
+const files = {};
+for (const n of NAMES) files[n] = new Uint8Array(await (await fetch(`data/${n}`)).arrayBuffer());
+
+const sab = new SharedArrayBuffer(8192 + 800 * 600);
+const ctrl = new Int32Array(sab, 0, 1024), pal = new Uint8Array(sab, 4096, 768), scr = new Uint8Array(sab, 8192, 800 * 600);
+ctrl[0] = 0x80;
+const worker = new Worker("web/worker.js", { type: "module" });
+worker.postMessage({ files, sab });
+status.textContent = "";
+
+// ── 소리 — 작업 스레드가 보낸 PC 스피커 켜기·끄기 기록 [시각µs, hz(0 = 끔)]... 으로 파형을 만들어 그 시각에 튼다.
+// 켜져 있는 동안은 타이머 채널 2 의 네모파(sound 가 방식 3 으로 다시 세우므로 켤 때 높은 쪽에서 시작), 꺼지면 0.
+// 1µs 단위로 만들어 한 샘플 구간의 평균을 낸다 — 맞을 때의 펄스는 4.67µs 라 샘플(약 21µs)보다 짧다.
+let audio = null;
+const SPK_AMP = 0.5, SPK_LATENCY = 0.05;
+let spk = { on: false, hz: 0, since: 0, end: 0 };
+function playSpeaker(ev, origin) {
+  const sr = audio.sampleRate;
+  const t0 = spk.on ? spk.end : ev[0];
+  let on = spk.on, hz = spk.hz, since = spk.since, k = 0;
+  const lastOn = ev[ev.length - 1] > 0;
+  const t1 = ev[ev.length - 2] + (lastOn ? 0 : 50);
+  const n = Math.max(1, Math.ceil((t1 - t0) * sr / 1e6) + 1);
+  const buf = audio.createBuffer(1, n, sr), d = buf.getChannelData(0);
+  for (let t = t0; t < t1; t++) {
+    while (k < ev.length && ev[k] <= t) { const h = ev[k + 1]; if (h > 0) { if (!on) since = ev[k]; on = true; hz = h; } else on = false; k += 2; }
+    if (on) { const p = 1e6 / hz; d[Math.floor((t - t0) * sr / 1e6)] += ((t - since) % p < p / 2 ? SPK_AMP : -SPK_AMP) * sr / 1e6; }
+  }
+  while (k < ev.length) { const h = ev[k + 1]; if (h > 0) { if (!on) since = ev[k]; on = true; hz = h; } else on = false; k += 2; }
+  spk = { on, hz, since, end: t1 };
+  const src = audio.createBufferSource(); src.buffer = buf; src.connect(audio.destination);
+  const when = audio.currentTime + ((origin + t0 / 1000) - (performance.timeOrigin + performance.now())) / 1000 + SPK_LATENCY;
+  src.start(Math.max(when, audio.currentTime));
+}
+worker.onmessage = (e) => {
+  if ("stopped" in e.data) { status.textContent = `멈춤: ${e.data.stopped}`; console.log(e.data.gaps); return; }
+  // LEAVE GAME — 원본은 DOS 로 나간다. 브라우저에서는 끝 화면을 보이고, 키를 누르면 처음부터 다시 연다.
+  if (e.data.quit) {
+    quit = true;
+    ctx.fillStyle = "#000"; ctx.fillRect(0, 0, 1600, 1200);
+    ctx.fillStyle = "#aaa"; ctx.font = "48px monospace"; ctx.textAlign = "center";
+    ctx.fillText("You have left D-Zone.", 800, 560);
+    ctx.fillText("Press any key to play again.", 800, 640);
+    return;
+  }
+  if (e.data.spk && audio) playSpeaker(e.data.spk, e.data.origin);
+};
+
+// ── 키 — 포트 0x60 에는 마지막 스캔코드(누름) 또는 스캔코드|0x80(뗌), BIOS 키 버퍼에는 글자
+const SC = {
+  Escape: 1, Digit1: 2, Digit2: 3, Digit3: 4, Digit4: 5, Digit5: 6, Digit6: 7, Digit7: 8, Digit8: 9, Digit9: 10, Digit0: 11,
+  Minus: 12, Equal: 13, Backspace: 14, Tab: 15, KeyQ: 16, KeyW: 17, KeyE: 18, KeyR: 19, KeyT: 20, KeyY: 21, KeyU: 22,
+  KeyI: 23, KeyO: 24, KeyP: 25, BracketLeft: 26, BracketRight: 27, Enter: 28, ControlLeft: 29, KeyA: 30, KeyS: 31,
+  KeyD: 32, KeyF: 33, KeyG: 34, KeyH: 35, KeyJ: 36, KeyK: 37, KeyL: 38, Semicolon: 39, Quote: 40, Backquote: 41,
+  ShiftLeft: 42, Backslash: 43, KeyZ: 44, KeyX: 45, KeyC: 46, KeyV: 47, KeyB: 48, KeyN: 49, KeyM: 50, Comma: 51,
+  Period: 52, Slash: 53, ShiftRight: 54, NumpadMultiply: 55, AltLeft: 56, Space: 57, CapsLock: 58,
+  F1: 59, F2: 60, F3: 61, F4: 62, F5: 63, F6: 64, F7: 65, F8: 66, F9: 67, F10: 68,
+  Home: 71, Numpad7: 71, ArrowUp: 72, Numpad8: 72, PageUp: 73, Numpad9: 73, NumpadSubtract: 74, ArrowLeft: 75, Numpad4: 75,
+  Numpad5: 76, ArrowRight: 77, Numpad6: 77, NumpadAdd: 78, End: 79, Numpad1: 79, ArrowDown: 80, Numpad2: 80,
+  PageDown: 81, Numpad3: 81, Insert: 82, Numpad0: 82, Delete: 83, NumpadDecimal: 83, NumpadEnter: 28,
+};
+const bios = (v) => { const h = ctrl[1]; ctrl[8 + (h & 255)] = v; Atomics.store(ctrl, 1, h + 1); Atomics.notify(ctrl, 1); };
+let quit = false;
+addEventListener("keydown", (e) => {
+  if (quit) { location.reload(); return; }
+  const sc = SC[e.code];
+  if (sc === undefined) return;
+  e.preventDefault();
+  if (!audio) audio = new AudioContext();   // 브라우저는 사용자가 키를 누르기 전에는 소리를 막는다
+  Atomics.store(ctrl, 0, sc);
+  if (["Shift", "Control", "Alt", "Meta", "CapsLock"].includes(e.key)) return;   // BIOS 는 보조 키만으로는 버퍼에 안 넣는다
+  const ch = e.key.length === 1 ? e.key.charCodeAt(0) : { Enter: 13, Escape: 27, Backspace: 8 }[e.key];
+  if (ch !== undefined && ch < 128) bios(ch);
+  else { bios(0); bios(sc); }   // 확장 키는 BIOS 가 0 과 스캔코드 둘을 넣는다
+});
+addEventListener("keyup", (e) => {
+  const sc = SC[e.code];
+  if (sc === undefined) return;
+  e.preventDefault();
+  Atomics.store(ctrl, 0, sc | 0x80);
+});
+
+// ── 화면 — 작업 스레드가 새 화면을 내면 그린다. 캔버스 1600x1200 은 두 화면 모두 정수 배율이다
+// (모드 X 320x400 은 가로 5·세로 3, BGI 800x600 은 2). 정수가 아니면 점 굵기가 고르지 않다.
+const img = { 1: new ImageData(320, 400), 2: new ImageData(800, 600) };
+const off = { 1: new OffscreenCanvas(320, 400), 2: new OffscreenCanvas(800, 600) };
+ctx.imageSmoothingEnabled = false;
+let seen = -1;
+(function frame() {
+  const seq = Atomics.load(ctrl, 4), mode = ctrl[3];
+  if (!quit && seq !== seen && img[mode]) {
+    seen = seq;
+    const d = img[mode].data, n = mode === 1 ? 320 * 400 : 800 * 600;
+    for (let i = 0; i < n; i++) { const c = scr[i] * 3; d[i * 4] = pal[c]; d[i * 4 + 1] = pal[c + 1]; d[i * 4 + 2] = pal[c + 2]; d[i * 4 + 3] = 255; }
+    off[mode].getContext("2d").putImageData(img[mode], 0, 0);
+    ctx.drawImage(off[mode], 0, 0, 1600, 1200);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
