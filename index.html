@@ -103,6 +103,7 @@ addEventListener("keydown", (e) => {
   if (sc === undefined) return;
   e.preventDefault();
   if (!audio) audio = new AudioContext();   // 브라우저는 사용자가 키를 누르기 전에는 소리를 막는다
+  if (audio.state !== "running") audio.resume();   // 탭 전환·시스템 소리 끊김으로 멈췄으면 다시 켠다
   Atomics.store(ctrl, 0, sc);
   if (["Shift", "Control", "Alt", "Meta", "CapsLock"].includes(e.key)) return;   // BIOS 는 보조 키만으로는 버퍼에 안 넣는다
   const ch = e.key.length === 1 ? e.key.charCodeAt(0) : { Enter: 13, Escape: 27, Backspace: 8 }[e.key];

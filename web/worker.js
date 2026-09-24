@@ -11,10 +11,19 @@ import { setFiles } from "./shim.js";
 const W = 800, H = 600;
 // 원본의 한 바퀴 시간은 계산 시간과 빈 반복(0x0AC8A, 사람 한 명당 한 번)이다. 옮긴 코드는 계산에 시간이 거의 안 드니
 // 둘 다 여기서 기다린다.
-// · 계산: 로봇만 있는 robots5_30r_wide_v1(cycles 5000) 첫 6,000바퀴 간격의 중앙값 5.27ms 를 바퀴마다
+// · 계산: 살아 있는 탱크 수 [0x4D72] 와 물체 수 [0x4D71] 에 따라 크게 다르다. 원본은 그것을 전제로 한 바퀴 이동 거리를
+//   [0x4D63] = [0x4D6F] / (탱크×2 + 팀 + 물체/4) 로 나눠 체감 속도를 맞춘다. 그래서 고정값을 쓰면 탱크가 많을 때 빠르고
+//   적을 때 느리다(2026-09-24 사용자 지적). 로봇 기록 네 벌(cycles 5000) 457,325바퀴 간격의 중앙값을 탱크 수 × 물체 수/4
+//   별로 쓴다. 행 = 탱크 2..6 대, 열 = 물체 0-3, 4-7, … 24 이상. 탱크 2대 미만은 2대 줄을 쓴다.
 // · 빈 반복: 한 번 셀 때 10명령(0x0ACAE..0x0ACC6)을 cycles 5000 = 1ms 에 5,000명령으로
-// 사람 한 명이면 5.27 + 10 × (2 × 1131 + 1) / 5000 ≈ 9.8ms 이다. 사람 기록 human_live_match1_v1 의 중앙값은 9.9ms 였다.
-const WORK_MS = 5.27;
+const WORK_MS = [
+  [2.92, 3.95, 4.90, 5.67, 6.64, 7.65, 9.36],
+  [4.52, 5.52, 6.54, 7.40, 8.36, 9.47, 11.08],
+  [6.05, 7.10, 8.24, 9.19, 10.10, 11.13, 14.31],
+  [7.78, 8.99, 9.94, 10.95, 12.24, 13.23, 15.20],
+  [9.68, 11.31, 12.58, 13.60, 14.34, 16.34, 22.76],
+];
+const workMs = (live        , objs        ) => WORK_MS[Math.min(Math.max(live, 2), 6) - 2][Math.min(objs >> 2, 6)];
 const SPIN_MS = 10 / 5000;
 // 메뉴·상점이 빈 반복으로 포트를 읽는 속도. 사람 기록(cycles 12000)에서 잰 1ms 당 바퀴 수(메뉴 약 39, 상점 약 15,
 // devlog 119)를 cycles 5000 으로 줄인 값이다. 결과 화면의 대기 반복은 재지 않아서 늦추지 않는다.
@@ -89,7 +98,7 @@ self.onmessage = async (e              ) => {
       const v = ctrl[8 + (ctrl[2] & 255)]; ctrl[2]++; return v;
     },
     delay: (ms) => { present(true); pace(ms, 0); },
-    onIterationTop: () => { pace(WORK_MS); present(); },
+    onIterationTop: () => { pace(workMs(game.dg[0x4d72], game.dg[0x4d71])); present(); },
     spin: (n) => pace(n * SPIN_MS),
     sound: (hz) => speaker(hz, PULSE_ON_US),
     nosound: () => speaker(0, PULSE_OFF_US),
