@@ -19,6 +19,9 @@
 // 공유 메모리 배치는 worker.ts 머리 주석과 같다.
 const status = document.getElementById("status");
 const canvas = document.getElementById("screen"), ctx = canvas.getContext("2d");
+// 게임이 첫 화면을 그릴 때까지 캔버스가 검은색이라 멈춘 것처럼 보인다. 첫 화면이 이 글을 덮는다.
+ctx.fillStyle = "#aaa"; ctx.font = "48px monospace"; ctx.textAlign = "center";
+ctx.fillText("Loading…", 800, 600);
 if (!crossOriginIsolated) {
   // GitHub Pages 처럼 머리글을 못 바꾸는 곳에서는 coi.js 서비스 워커가 머리글을 붙이게 하고 한 번 새로 고친다
   let tried = false;
@@ -42,7 +45,6 @@ const ctrl = new Int32Array(sab, 0, 1024), pal = new Uint8Array(sab, 4096, 768),
 ctrl[0] = 0x80;
 const worker = new Worker("web/worker.js", { type: "module" });
 worker.postMessage({ files, sab });
-status.textContent = "";
 
 // ── 소리 — 작업 스레드가 보낸 PC 스피커 켜기·끄기 기록 [시각µs, hz(0 = 끔)]... 으로 파형을 만들어 그 시각에 튼다.
 // 켜져 있는 동안은 타이머 채널 2 의 네모파(sound 가 방식 3 으로 다시 세우므로 켤 때 높은 쪽에서 시작), 꺼지면 0.
@@ -126,6 +128,8 @@ let seen = -1;
 (function frame() {
   const seq = Atomics.load(ctrl, 4), mode = ctrl[3];
   if (!quit && seq !== seen && img[mode]) {
+    // 첫 화면 — "불러오는 중…" 을 여기서 지운다. 첫 화면 전에 멈췄으면 그 "멈춤: …" 은 남긴다
+    if (seen < 0 && status.textContent === "불러오는 중…") status.textContent = "";
     seen = seq;
     const d = img[mode].data, n = mode === 1 ? 320 * 400 : 800 * 600;
     for (let i = 0; i < n; i++) { const c = scr[i] * 3; d[i * 4] = pal[c]; d[i * 4 + 1] = pal[c + 1]; d[i * 4 + 2] = pal[c + 2]; d[i * 4 + 3] = 255; }
